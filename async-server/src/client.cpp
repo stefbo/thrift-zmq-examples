@@ -53,6 +53,10 @@ class Timer
 int main(int argc, char** argv) {
   const char* endpoint = "tcp://127.0.0.1:5555";
 
+  if(argc >= 2) {
+    endpoint = argv[1];
+  }
+
   zmq::context_t ctx;
   auto transport = make_shared<TZmqClient>(ctx, endpoint, ZMQ_REQ);
   auto protocol = make_shared<TCompactProtocol>(transport);
