@@ -20,6 +20,8 @@
 #define H8FE73F63_FB2C_4C0D_99DE_923F55134B11
 
 #include <zmq.hpp>
+#include <zmq_addon.hpp>
+
 #include <thrift/async/TAsyncBufferProcessor.h>
 
 #include <thread>
@@ -39,6 +41,14 @@ public:
       std::shared_ptr<apache::thrift::async::TAsyncBufferProcessor> processor,
       zmq::context_t * context, std::shared_ptr<zmq::socket_t> sock);
   ~TAsyncZmqServer();
+
+  /// Adds another `ROUTER` socket to check for incoming requests.
+  ///
+  /// Does not add the same socket multiple times.
+  ///
+  /// May only be called before `server`. Otherwise has no effect.
+  ///
+  void addSocket(std::shared_ptr<zmq::socket_t> sock);
 
   /// Starts serving requests.
   ///
@@ -62,7 +72,6 @@ public:
 
 private:
   class RequestContext;
-  class MultipartMessage;
 
   enum State {
     INIT,
@@ -74,15 +83,15 @@ private:
   State state_;
   std::shared_ptr<apache::thrift::async::TAsyncBufferProcessor> processor_;
   zmq::context_t * context_;
-  std::shared_ptr<zmq::socket_t> sock_;
-  zmq::socket_t dealer_; // Used to transport messages from other threads to the router's one.
-  std::pair<zmq::socket_t,zmq::socket_t> stop_signal_; // Used to internally control the server
+  std::vector<std::shared_ptr<zmq::socket_t>> socks_;
+  zmq::socket_t dealer_;  // Used to transport messages from other threads to the router's one.
+  std::pair<zmq::socket_t,zmq::socket_t> stop_signal_;  // Used to internally control the server
   std::thread::id thread_id_;
 
   void init();
   void createChannelForCurrentThread();
-  zmq::socket_t & getChannelForCurrentThread();
-  void process(MultipartMessage && msg);
+  std::shared_ptr<zmq::socket_t> getChannelForCurrentThread();
+  void process(zmq::multipart_t && msg);
   void complete(std::shared_ptr<RequestContext> ctx, bool success) throw();
 
   std::map<std::thread::id, std::shared_ptr<zmq::socket_t>> channels_;

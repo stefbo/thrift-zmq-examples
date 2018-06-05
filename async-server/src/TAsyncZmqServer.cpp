@@ -23,138 +23,41 @@
 
 #include <iostream>
 #include <iterator>
+#include <algorithm>
+#include <cassert>
 
 using apache::thrift::async::TAsyncBufferProcessor;
 using apache::thrift::transport::TMemoryBuffer;
 
 using namespace std;
 
-/// Handles multi-part messages for REQ/REP pattern.
-///
-/// Frames until the empty frame are considered address frames. The frame
-/// afterwards contains the actual data. Only a single frame containing data
-/// is expected.
-class TAsyncZmqServer::MultipartMessage
-{
- public:
-  MultipartMessage() = default;
+namespace {
+const std::string kStopSignal = "STOP";
+}  // anonymous namespace
 
-  // The messages are reference counted.
-  MultipartMessage(MultipartMessage&& other) { msgs_.swap(other.msgs_); }
-  MultipartMessage& operator=(MultipartMessage&) = delete;
-  MultipartMessage(MultipartMessage&) = delete;
-
-  /// Receive the multi-part message from a socket.
-  ///
-  /// Any new messages received from the socket are appended to the existing
-  /// messages. In case of an error (`EAGAIN` is not an error), no part of the
-  /// multi-part message is kept.
-  ///
-  /// @return Returns `false` only if ZeroMQ's `zmq_recv` failed with `EAGAIN`.
-  /// @throws Throws `zmq::error_t` on error.
-  bool receive(zmq::socket_t & sock) {
-    bool okay = true;
-    int64_t has_more = 1;
-    std::vector<zmq::message_t> tmp;
-
-    while (has_more && okay) {
-      zmq::message_t msg;
-      okay = sock.recv(&msg);
-      if (okay) {
-        has_more = sock.getsockopt<int64_t>(ZMQ_RCVMORE);
-        tmp.emplace_back(std::move(msg));
-      }
-    }
-
-    msgs_.insert(msgs_.end(), std::make_move_iterator(tmp.begin()),
-                 std::make_move_iterator(tmp.end()));
-    return okay;
-  }
-
-  /// Send the multi-part message to the socket.
-  ///
-  /// @return Returns `false` only if ZeroMQ's `zmq_send` failed with `EAGAIN`.
-  /// @throws Throws `zmq::error_t` on error.
-  bool send(zmq::socket_t & sock) {
-
-    bool okay = true;
-    auto iter = msgs_.begin();
-    for (; iter != msgs_.end() && okay; ++iter) {
-      auto & msg = *iter;
-      const bool has_more = (iter + 1 != msgs_.end());
-
-      int flags = 0;
-      if (has_more) {
-        flags = ZMQ_SNDMORE;
-      }
-      okay = sock.send(msg, flags);
-    }
-
-    // Sending messages transfers ownership of the messages to ZeroMQ.
-    msgs_.erase(msgs_.begin(), iter);
-    return okay;
-  }
-
-  /// Returns the single message that contains the data (if any). Returns
-  /// `nullptr` otherwise.
-  zmq::message_t * getDataFrame() {
-    zmq::message_t * result = nullptr;
-    if (!msgs_.empty()) {
-      result = &msgs_.back();
-    }
-    return result;
-  }
-
-  /// Sets data of the multi-part message's data frame to the data of the given
-  /// `TMemoryBuffer`.
-  void setData(TMemoryBuffer & obuf) {
-    uint8_t* ptr = nullptr;
-    uint32_t size = 0;
-    obuf.getBuffer(&ptr, &size);
-
-    setData(ptr, size);
-  }
-
- private:
-  /// Sets the data of the multi-part message's data frame.
-  void setData(uint8_t * buf, size_t size) {
-    assert(!msgs_.empty());
-    assert(buf != NULL);
-    assert(size >= 0);
-
-    msgs_.back().rebuild(buf, size);
-  }
-
-  std::vector<zmq::message_t> msgs_;
-};
-
-class TAsyncZmqServer::RequestContext {
- public:
-  MultipartMessage msg;
+struct TAsyncZmqServer::RequestContext {
+  zmq::multipart_t msg;
   shared_ptr<TMemoryBuffer> ibuf;
   shared_ptr<TMemoryBuffer> obuf;
 
   // Takes ownership of the message.
-  RequestContext(MultipartMessage && msgArg);
+  RequestContext(zmq::multipart_t && msgArg);
 };
 
 TAsyncZmqServer::TAsyncZmqServer(shared_ptr<TAsyncBufferProcessor> processor, zmq::context_t * context, std::shared_ptr<zmq::socket_t> sock)
     : processor_(processor),
       context_(context),
-      sock_(sock),
       dealer_(*context, ZMQ_DEALER),
       stop_signal_({zmq::socket_t(*context, ZMQ_PAIR), zmq::socket_t(*context, ZMQ_PAIR)}) {
   init();
+  addSocket(sock);
 }
 
 void TAsyncZmqServer::init() {
-  assert(sock_);
-  assert(sock_->getsockopt<int>(ZMQ_TYPE) == ZMQ_ROUTER);
-
   state_ = INIT;
   dealer_.bind("inproc://TAsyncZmqServer_internal");
-  stop_signal_.second.bind("inproc://TAsyncZmqServer_stop");
-  stop_signal_.first.connect("inproc://TAsyncZmqServer_stop");
+  stop_signal_.second.bind("inproc://TAsyncZmqServer_signals");
+  stop_signal_.first.connect("inproc://TAsyncZmqServer_signals");
 }
 
 TAsyncZmqServer::~TAsyncZmqServer() {
@@ -164,37 +67,51 @@ TAsyncZmqServer::~TAsyncZmqServer() {
 
 void TAsyncZmqServer::serve() {
   thread_id_ = std::this_thread::get_id();
-  channels_[thread_id_] = sock_;
 
   state_ = RUNNING;
 
   T_DEBUG_L(1, "Server running.");
 
-  while (RUNNING == state_) {
+  std::vector<zmq_pollitem_t> items;
+  items.push_back({ dealer_, 0, ZMQ_POLLIN, 0 });
+  items.push_back({ stop_signal_.second, 0, ZMQ_POLLIN, 0 });
+  for (auto & sock : socks_) {
+    items.push_back( { *sock, 0, ZMQ_POLLIN, 0 });
+  }
 
-    zmq_pollitem_t items[] = { { *sock_, 0, ZMQ_POLLIN, 0 }, { dealer_, 0,
-        ZMQ_POLLIN, 0 }, { stop_signal_.second, 0, ZMQ_POLLIN, 0 } };
+  while (RUNNING == state_) {
+    // Reset events.
+    std::for_each(items.begin(), items.end(), [](zmq_pollitem_t & item){ item.revents = 0; });
 
     // Note: We currently do no handle EGAIN here.
     // Note: If any IO operation fails, we simple silently drop the message.
 
-    int ret = zmq::poll(items, /*nitems=*/3, std::chrono::milliseconds(1000));
+    int ret = zmq::poll(items, std::chrono::milliseconds(1000));
     if (ret > 0) {
       if (items[0].revents & ZMQ_POLLIN) {
-        MultipartMessage msg;
-        (void)msg.receive(*sock_);
-        process(move(msg));
+        zmq::multipart_t msg;
+        (void)msg.recv(dealer_);
+
+        auto index = msg.poptyp<size_t>();
+        assert(index < socks_.size());
+        (void)msg.send(*socks_[index]);
       }
 
       if (items[1].revents & ZMQ_POLLIN) {
-        MultipartMessage msg;
-        (void)msg.receive(dealer_);
-        (void)msg.send(*sock_);
-      }
-
-      if (items[2].revents & ZMQ_POLLIN) {
         T_DEBUG_L(1, "Server received STOP signal.");
         break;
+      }
+
+      for (size_t i = 2; i < items.size(); ++i) {
+        if (items[i].revents & ZMQ_POLLIN) {
+          size_t index = i-2;
+          zmq::multipart_t msg;
+          (void) msg.recv(*socks_[index]);
+
+          // Store the sock's index for reference when sending the response.
+          msg.pushtyp(index);
+          process(move(msg));
+        }
       }
     }
   }
@@ -206,14 +123,14 @@ void TAsyncZmqServer::serve() {
   stop_signal_.second.send("", 0);
 }
 
-TAsyncZmqServer::RequestContext::RequestContext(MultipartMessage && msgArg)
+TAsyncZmqServer::RequestContext::RequestContext(zmq::multipart_t && msgArg)
   : msg(move(msgArg)),
-    ibuf(new TMemoryBuffer((uint8_t*)msg.getDataFrame()->data(), msg.getDataFrame()->size())),
+    ibuf(new TMemoryBuffer((uint8_t*)msg.rbegin()->data(), msg.rbegin()->size())),
     obuf(new TMemoryBuffer()) {
   // Intentionally left empty.
 }
 
-void TAsyncZmqServer::process(MultipartMessage && msg) {
+void TAsyncZmqServer::process(zmq::multipart_t && msg) {
   auto rq = make_shared<RequestContext>(move(msg));
   return processor_->process(
       std::bind(&TAsyncZmqServer::complete, this, rq, std::placeholders::_1),
@@ -235,15 +152,15 @@ void TAsyncZmqServer::createChannelForCurrentThread()
 
 
 // Throws std::out_of_range if the no socket could be created.
-zmq::socket_t & TAsyncZmqServer::getChannelForCurrentThread()
+std::shared_ptr<zmq::socket_t> TAsyncZmqServer::getChannelForCurrentThread()
 {
-  auto key = this_thread::get_id();
+  const auto key = this_thread::get_id();
   auto iter = channels_.find(key);
-  if(iter == channels_.end()) {
+  if (iter == channels_.end()) {
     createChannelForCurrentThread();
   }
 
-  return *channels_.at(key);
+  return channels_.at(key);
 }
 
 void TAsyncZmqServer::complete(shared_ptr<RequestContext> rq, bool success) throw() {
@@ -256,11 +173,24 @@ void TAsyncZmqServer::complete(shared_ptr<RequestContext> rq, bool success) thro
     T_ERROR("Received malformed Thrift request. Ignored!");
   } else {
     try {
-      auto & dest_sock = getChannelForCurrentThread();
+      std::shared_ptr<zmq::socket_t> dest_sock;
+      if (this_thread::get_id() == thread_id_) {
+        auto index = rq->msg.poptyp<size_t>();
+        assert(index < socks_.size());
+        dest_sock = socks_[index];
+      } else {
+        dest_sock = getChannelForCurrentThread();
+      }
 
-      rq->msg.setData(*rq->obuf);
-      //rq->msg.print();
-      (void) rq->msg.send(dest_sock);
+      assert(dest_sock);
+
+      // Replace the data in the original message.
+      uint8_t* ptr = nullptr;
+      uint32_t size = 0;
+      rq->obuf->getBuffer(&ptr, &size);
+
+      rq->msg.rbegin()->rebuild(ptr, size);
+      (void) rq->msg.send(*dest_sock);
     } catch (...) {
       // Ignore.
       T_ERROR("Error when sending.");
@@ -272,23 +202,31 @@ void TAsyncZmqServer::stop() {
   if(RUNNING == state_) {
     state_ = STOPPING;
 
-    cout << "Sending signal to stop server ... ";
-    cout.flush();
-    (void)zmq_send(stop_signal_.first, "", 0, 0);
-    cout << "done" << endl;
+    T_DEBUG_L(1, "Sending signal to stop server ... ");
+    stop_signal_.first.send(kStopSignal.c_str(), kStopSignal.size());
   }
 }
 
-bool TAsyncZmqServer::waitStopped()
-{
+bool TAsyncZmqServer::waitStopped() {
   if (state_ != STOPPED) {
     try {
-      char buf[1];
-      (void) stop_signal_.first.recv(buf, sizeof(buf));
+      T_DEBUG_L(1, "Server did not stop yet. Waiting ...");
+      zmq_pollitem_t item( { stop_signal_.first, 0, ZMQ_POLLIN, 0 });
+      (void) zmq::poll(&item, 1);
     } catch (zmq::error_t & e) {
       T_ERROR("Waiting for server stopped failed. %s", e.what());
     }
   }
 
   return STOPPED == state_;
+}
+
+void TAsyncZmqServer::addSocket(std::shared_ptr<zmq::socket_t> sock) {
+  if (INIT == state_) {
+    assert(sock->getsockopt<int>(ZMQ_TYPE) == ZMQ_ROUTER);
+
+    if (std::find(socks_.begin(), socks_.end(), sock) == socks_.end()) {
+      socks_.push_back(sock);
+    }
+  }
 }
