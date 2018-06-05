@@ -141,6 +141,12 @@ void runServer(shared_ptr<TrivialCooperativeScheduler> sched, zmq::context_t & c
     sock->bind("tcp://*:5555");
 
     g_server = make_shared<TAsyncZmqServer>(protocolProcessor, &context, sock);
+
+    // Create another IPC socket.
+    sock = make_shared<zmq::socket_t>(context, ZMQ_ROUTER);
+    sock->bind("ipc:///tmp/conn");
+    g_server->addSocket(sock);
+
     cout << "Serving requests ..." << endl;
     g_server->serve();
 
