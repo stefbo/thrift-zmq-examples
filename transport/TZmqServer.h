@@ -20,34 +20,47 @@
 #ifndef _THRIFT_SERVER_TZMQSERVER_H_
 #define _THRIFT_SERVER_TZMQSERVER_H_ 1
 
+#include <thrift/TProcessor.h>
+#include <thrift/protocol/TProtocol.h>
+#include <thrift/concurrency/Thread.h>
+#include <thrift/concurrency/Mutex.h>
+
 #include <zmq.hpp>
-#include <thrift/server/TServer.h>
 #include "TZmqTransport.h"
 
 namespace apache { namespace thrift { namespace server {
 
-/// @note Does not support per-client processors.
-///
-/// @note Events handlers `TServerEventHandler` are currently not supported.
-///
-class TZmqServer : public TServer {
+/** A simple ZeroMQ server based on @ref TZmqTransport.
+ *
+ * @internally Internally does not derive from TServer, because it does not
+ * implement most of its features, including:
+ * - No support for per-client processors.
+ * - No differentiation between the server's transport and the support to
+ *   process client requests.
+ * - No support for server event handlers (@ref TServerEventHandler).
+ */
+class TZmqServer : public concurrency::Runnable {
  public:
-  TZmqServer(const stdcxx::shared_ptr<TProcessor>& processor,
-             const stdcxx::shared_ptr<transport::TZmqTransport>& transport,
-             const stdcxx::shared_ptr<protocol::TProtocol>& protocol);
+  TZmqServer( zmq::context_t & context,
+              stdcxx::shared_ptr<TProcessor> processor,
+             stdcxx::shared_ptr<transport::TZmqTransport> transport,
+             stdcxx::shared_ptr<protocol::TProtocolFactory> protocolFactory);
 
   void serve();
 
+  void stop();
+
+  // Allows running the server as a Runnable thread
+  virtual void run();
+
  private:
-  // The `TServer` stores the processor using a `TSingletonProcessorFactory`,
-  // but the lookup is rather complicated. See `TServer::getProcessor`.
   stdcxx::shared_ptr<TProcessor> processor_;
-
-  // The transport cannot be stored in `TServer`, because it does only accept
-  // `TServerTransport`.
-  stdcxx::shared_ptr<TTransport> transport_;
-
   stdcxx::shared_ptr<protocol::TProtocol> protocol_;
+
+  // Used to internally control the server
+  concurrency::Mutex rwMutex_;
+  zmq::socket_t interruptSend_;
+  stdcxx::shared_ptr<zmq::socket_t> interruptRecv_;
 };
 
 }}} // apache::thrift::server

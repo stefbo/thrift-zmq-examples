@@ -9,7 +9,7 @@
 
 namespace apache { namespace thrift { namespace transport {
 
-/**
+/** \todo
  */
 class TZmqTransport : public TVirtualTransport<TZmqTransport> {
  public:
@@ -32,7 +32,7 @@ class TZmqTransport : public TVirtualTransport<TZmqTransport> {
    *
    * @param sock The ZeroMQ socket. Must not be `NULL`.
    */
-  TZmqTransport(stdcxx::shared_ptr<zmq::socket_t>& sock);
+  explicit TZmqTransport(stdcxx::shared_ptr<zmq::socket_t>& sock);
 
   /** Returns the underlying ZeroMQ socket.
    */
@@ -62,8 +62,17 @@ class TZmqTransport : public TVirtualTransport<TZmqTransport> {
 
   /** @} */
 
+  /** Sets the socket used to interrupt pending reads on the ZeroMQ socket.
+   *
+   * Becomes effective the next time @read is called. Does not affect
+   * @ref write.
+   */
+  void setInterruptSocket(stdcxx::shared_ptr<zmq::socket_t> interruptListener);
+
  private:
   stdcxx::shared_ptr<zmq::socket_t> sock_;
+  stdcxx::shared_ptr<zmq::socket_t> interruptListener_;
+
   TMemoryBuffer wbuf_;
   TMemoryBuffer rbuf_;
   zmq::message_t inmsg_;

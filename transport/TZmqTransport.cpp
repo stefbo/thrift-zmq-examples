@@ -30,14 +30,35 @@ void TZmqTransport::close() {
 uint32_t TZmqTransport::read(uint8_t* buf, uint32_t len) {
   // \todo Does not work with e.g. DEALER or multi-part PUB.
 
+  zmq_pollitem_t items[2] = { { *sock_, 0, ZMQ_POLLIN, 0 }, 0 };
+  int itemsUsed = 1;
+
+  if (interruptListener_) {
+    items[1] = {*interruptListener_, 0, ZMQ_POLLIN, 0};
+    ++itemsUsed;
+  }
+
   if (rbuf_.available_read() == 0) {
     try {
-      if (!sock_->recv(&inmsg_)) {
-        throw TTransportException(TTransportException::TIMED_OUT);
+      int ret = zmq::poll(items, itemsUsed);
+      if (ret > 0) {
+        if (itemsUsed >= 2 && (items[1].revents & ZMQ_POLLIN) != 0) {
+          // Read the message used to interrupt, so the transport can be
+          // used again later.
+          zmq::message_t msg;
+          (void) interruptListener_->recv(&msg);
+          throw TTransportException(TTransportException::INTERRUPTED);
+        } else if ((items[0].revents & ZMQ_POLLIN) != 0)
+          if (!sock_->recv(&inmsg_)) {
+            throw TTransportException(TTransportException::TIMED_OUT);
+          }
+
+        rbuf_.resetBuffer((uint8_t*) inmsg_.data(), inmsg_.size());
       }
-      rbuf_.resetBuffer((uint8_t*) inmsg_.data(), inmsg_.size());
+
     } catch (zmq::error_t& e) {
-      throw TTransportException(TTransportException::UNKNOWN,
+      throw TTransportException(
+          TTransportException::UNKNOWN,
           std::string("Receiving ZeroMQ message failed. ") + e.what());
     }
   }
@@ -71,4 +92,11 @@ stdcxx::shared_ptr<zmq::socket_t> TZmqTransport::getSocket() {
   return sock_;
 }
 
-}}}  // apache::thrift::transport
+void TZmqTransport::setInterruptSocket(
+    stdcxx::shared_ptr<zmq::socket_t> interruptListener) {
+  interruptListener_ = interruptListener;
+}
+
+}
+}
+}  // apache::thrift::transport

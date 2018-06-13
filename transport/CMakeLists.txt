@@ -20,7 +20,6 @@ add_custom_command(OUTPUT ${GEN_DIR}/gen-cpp/example_types.h
 
 add_executable(client
 	client.cpp
-	TZmqClient.cpp
 	TZmqTransport.cpp
 	${GEN_DIR}/gen-cpp/example_types.cpp
 	${GEN_DIR}/gen-cpp/example_constants.cpp

@@ -20,31 +20,57 @@
 #include "TZmqServer.h"
 #include <thrift/transport/TBufferTransports.h>
 
-#include <iostream> // \todo remove
+#include <iostream> // \todo rmeove
+using namespace std;
+
+using apache::thrift::transport::TTransportException;
 
 namespace apache { namespace thrift { namespace server {
 
 TZmqServer::TZmqServer(
-    const stdcxx::shared_ptr<TProcessor>& processor,
-    const stdcxx::shared_ptr<transport::TZmqTransport>& transport,
-    const stdcxx::shared_ptr<protocol::TProtocol>& protocol)
-  // \todo What to do with the protocol?
-    : TServer(processor),
-      processor_(processor),
-      transport_(transport), protocol_(protocol) {
-  // Intentionally left empty.
+    zmq::context_t & context,
+    stdcxx::shared_ptr<TProcessor> processor,
+    stdcxx::shared_ptr<transport::TZmqTransport> transport,
+    stdcxx::shared_ptr<protocol::TProtocolFactory> protocolFactory)
+    : processor_(processor),
+      protocol_(protocolFactory->getProtocol(transport)),
+      interruptSend_(context, ZMQ_PAIR),
+      interruptRecv_(std::make_shared<zmq::socket_t>(context, ZMQ_PAIR)) {
+  const char interruptEndpoint[] = "inproc://TZmqServer_interrupt";
+  interruptRecv_->bind(interruptEndpoint);
+  interruptSend_.connect(interruptEndpoint);
+  transport->setInterruptSocket(interruptRecv_);
 }
 
-void TZmqServer::serve()
-{
-  if (!transport_->isOpen()) {
-    std::cout << "Transport not open!" << std::endl;
-  }
-  // \todo handle return value
+void TZmqServer::serve() {
+  while (true) {
+    try {
+      if (!processor_->process(protocol_, NULL)) {
+        break;
+      }
+    } catch (TTransportException & e) {
+      if (e.getType() == TTransportException::TIMED_OUT) {
+        // Accept timeout - continue processing.
+        continue;
+      } else if (e.getType() == TTransportException::INTERRUPTED) {
+        // Server was interrupted.  This only happens when stopping.
+        cerr << "interrupted" << endl;
+        break;
+      } else {
+        throw;
+      }
+    }
+  }  // while-loop
+  cerr << "service finished" << endl;
+}
 
-  while(true) {
-    processor_->process(protocol_, NULL);
-  }
+void TZmqServer::stop() {
+  concurrency::Guard g(rwMutex_);
+  (void) interruptSend_.send("", 0);
+}
+
+void TZmqServer::run() {
+  serve();
 }
 
 }}} // apache::thrift::server

@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <memory>
+#include <thread>
 
 #include "gen-cpp/Example.h"
 
@@ -24,25 +25,34 @@ public:
 
   virtual void println(const std::string& msg) {
     cout << "\"" << msg << "\"" << endl;
+    usleep(1000*250);
   }
 };
 
 int main(int argc, char **argv) {
+
+  if(argc != 2) {
+    cerr << "Usage: " << argv[0] << " endpoint" << endl;
+    return 1;
+  }
+
+  string endpoint = argv[1];
   zmq::context_t context;
-#if 1
   auto sock = make_shared<zmq::socket_t>(context, ZMQ_PULL);
-  sock->bind("tcp://*:6000");
+  sock->bind(endpoint);
 
   auto transport = make_shared<TZmqTransport>(sock);
-#else
-  auto transport = make_shared<TZmqTransport>(context, "tcp://*:6000", ZMQ_REP, /*doBind=*/true);
-#endif
-  auto protocol = make_shared<TCompactProtocol>(transport);
   auto handler = make_shared<ExampleHandler>();
   auto processor = make_shared<ExampleProcessor>(handler);
 
-  TZmqServer server(processor, transport, protocol);
+  TZmqServer server(context, processor, transport, make_shared<TCompactProtocolFactory>());
+
+  std::thread timeoutThread([&server](){usleep(2*1000*1000); server.stop();});
+
+  cout << "Serving endpoint " << endpoint << ". Press CTRL+C to abort ..." << endl;
   server.serve();
+
+  timeoutThread.join();
 
   return 0;
 }
