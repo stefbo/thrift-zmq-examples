@@ -1,18 +1,10 @@
-#include <thrift/protocol/TCompactProtocol.h>
-#include "TZmqTransport.h"
+#include "common.h"
 #include "TZmqServer.h"
-
-#include <zmq.hpp>
-
-#include <iostream>
-#include <memory>
-#include <thread>
-
 #include "gen-cpp/Example.h"
 
-using namespace apache::thrift::transport;
-using namespace apache::thrift::protocol;
-using namespace apache::thrift::server;
+#include <iostream>
+
+using apache::thrift::server::TZmqServer;
 using namespace std;
 
 class ExampleHandler : public ExampleIf
@@ -38,21 +30,18 @@ int main(int argc, char **argv) {
 
   string endpoint = argv[1];
   zmq::context_t context;
-  auto sock = make_shared<zmq::socket_t>(context, ZMQ_PULL);
+  stdcxx::shared_ptr<zmq::socket_t> sock (new zmq::socket_t(context, ZMQ_REP));
   sock->bind(endpoint);
 
-  auto transport = make_shared<TZmqTransport>(sock);
-  auto handler = make_shared<ExampleHandler>();
-  auto processor = make_shared<ExampleProcessor>(handler);
+  stdcxx::shared_ptr<TZmqTransport> transport(new TZmqTransport(sock));
+  stdcxx::shared_ptr<ExampleHandler> handler(new ExampleHandler);
+  stdcxx::shared_ptr<ExampleProcessor> processor(new ExampleProcessor(handler));
+  stdcxx::shared_ptr<ProtocolFactory> protocolFactory(new ProtocolFactory);
 
-  TZmqServer server(context, processor, transport, make_shared<TCompactProtocolFactory>());
-
-  std::thread timeoutThread([&server](){usleep(2*1000*1000); server.stop();});
+  TZmqServer server(context, processor, transport, protocolFactory);
 
   cout << "Serving endpoint " << endpoint << ". Press CTRL+C to abort ..." << endl;
   server.serve();
-
-  timeoutThread.join();
 
   return 0;
 }

@@ -35,7 +35,7 @@ TZmqServer::TZmqServer(
     : processor_(processor),
       protocol_(protocolFactory->getProtocol(transport)),
       interruptSend_(context, ZMQ_PAIR),
-      interruptRecv_(std::make_shared<zmq::socket_t>(context, ZMQ_PAIR)) {
+      interruptRecv_(new zmq::socket_t(context, ZMQ_PAIR)) {
   const char interruptEndpoint[] = "inproc://TZmqServer_interrupt";
   interruptRecv_->bind(interruptEndpoint);
   interruptSend_.connect(interruptEndpoint);
@@ -43,25 +43,22 @@ TZmqServer::TZmqServer(
 }
 
 void TZmqServer::serve() {
-  while (true) {
+  for(bool done = false; !done; ) {
     try {
       if (!processor_->process(protocol_, NULL)) {
-        break;
+        done = true;
       }
     } catch (TTransportException & e) {
       if (e.getType() == TTransportException::TIMED_OUT) {
         // Accept timeout - continue processing.
-        continue;
       } else if (e.getType() == TTransportException::INTERRUPTED) {
         // Server was interrupted.  This only happens when stopping.
-        cerr << "interrupted" << endl;
-        break;
+        done = true;
       } else {
         throw;
       }
     }
-  }  // while-loop
-  cerr << "service finished" << endl;
+  }  // for-loop
 }
 
 void TZmqServer::stop() {

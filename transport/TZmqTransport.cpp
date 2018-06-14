@@ -30,11 +30,12 @@ void TZmqTransport::close() {
 uint32_t TZmqTransport::read(uint8_t* buf, uint32_t len) {
   // \todo Does not work with e.g. DEALER or multi-part PUB.
 
-  zmq_pollitem_t items[2] = { { *sock_, 0, ZMQ_POLLIN, 0 }, 0 };
+  zmq_pollitem_t items[2] = { { *sock_, 0, ZMQ_POLLIN, 0 },
+      {NULL, 0, ZMQ_POLLIN, 0} };
   int itemsUsed = 1;
 
   if (interruptListener_) {
-    items[1] = {*interruptListener_, 0, ZMQ_POLLIN, 0};
+    items[1].socket = *interruptListener_;
     ++itemsUsed;
   }
 
